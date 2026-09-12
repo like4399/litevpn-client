@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# litevpn-client-linux: subscription helper + systemd wrapper around mihomo.
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "litevpn-client-linux only runs on Linux. Use Clash Verge on Windows." >&2
+  exit 1
+fi
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/litevpn"
+SHARE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/litevpn"
+BIN_DIR="${LITEVPN_BIN_DIR:-$HOME/.local/bin}"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+UI_DIR="$SHARE_DIR/ui"
+SECRET_FILE="$CONFIG_DIR/secret"
+URL_FILE="$CONFIG_DIR/subscription.url"
+SUB_FILE="$CONFIG_DIR/subscription.yaml"
+CFG_FILE="$CONFIG_DIR/config.yaml"
+MIHOMO="$BIN_DIR/mihomo"
+MERGE_PY="$SHARE_DIR/pack/merge_config.py"
+UNIT_SRC="$SHARE_DIR/pack/litevpn.service"
+UNIT_DST="$UNIT_DIR/litevpn.service"
+WEB_UNIT_SRC="$SHARE_DIR/pack/litevpn-web.service"
+WEB_UNIT_DST="$UNIT_DIR/litevpn-web.service"
+
+MIXED_PORT=7890
+MIHOMO_API="http://127.0.0.1:19090"
+WEB_URL="http://127.0.0.1:9090/ui"
+SUBS_URL="http://127.0.0.1:9090/subs"
+
+die() { echo "litevpn: $*" >&2; exit 1; }
+
+pack_fallback() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "$here/pack/merge_config.py" ]]; then
+    SHARE_DIR_SRC="$here"
+    MERGE_PY="$here/pack/merge_config.py"
+    UNIT_SRC="$here/pack/litevpn.service"
+    WEB_UNIT_SRC="$here/pack/litevpn-web.service"
+  fi
+}
+
+if [[ ! -f "$MERGE_PY" ]]; then
+  pack_fallback
+fi
+
+usage() {
+  cat <<'EOF'
+usage: litevpn <command>
+
+  setup              create dirs, API secret, systemd --user units
+  import <url>       save subscription URL, fetch, merge, validate
+  update             fetch subscription again and reload if running
+  up                 start mihomo + local web proxy
+  down               stop
+  status             ports, service, web URL
+  log [-f]           recent journal ( -f follows )
+  env                print proxy export lines for eval
+  help               this text
+
+first run (Ubuntu 24.04):
+  ./scripts/install.sh
+  litevpn setup
+  litevpn import '<url>'
+  litevpn up
+  ssh -L 9090:127.0.0.1:9090 <host>   # if remote
+  open http://127.0.0.1:9090/subs
+  open http://127.0.0.1:9090/ui
+EOF
+}
+
+ensure_dirs() {
+  mkdir -p "$CONFIG_DIR" "$SHARE_DIR" "$UNIT_DIR" "$BIN_DIR"
+  chmod 700 "$CONFIG_DIR"
+}
+
+ensure_secret() {
+  if [[ ! -s "$SECRET_FILE" ]]; then
+    python3 - <<'PY'
+import secrets
+from pathlib import Path
+import os
+p = Path(os.environ["SECRET_FILE"])
+p.write_text(secrets.token_hex(16), encoding="utf-8")
+p.chmod(0o600)
+PY
+  fi
+}
+
+secret() {
+  [[ -s "$SECRET_FILE" ]] || die "no secret; run: litevpn setup"
+  tr -d '\n' < "$SECRET_FILE"
+}
+
+has_sys_unit() {
+  [[ -f /etc/systemd/system/litevpn.service ]]
+}
+
+cmd_setup() {
+  ensure_dirs
+  export SECRET_FILE
+  ensure_secret
+  [[ -x "$MIHOMO" ]] || die "mihomo not found at $MIHOMO (run scripts/install.sh)"
+  [[ -f "$MERGE_PY" ]] || die "merge_config.py not found (run scripts/install.sh)"
+  [[ -d "$UI_DIR" && -f "$UI_DIR/index.html" ]] || die "metacubexd UI missing at $UI_DIR (run scripts/install.sh)"
+  if has_sys_unit; then
+    echo "setup ok (system units already present)"
+    echo "  config: $CONFIG_DIR"
+    echo "  secret: $SECRET_FILE"
+    echo "  unit:   /etc/systemd/system/litevpn.service"
+    return 0
+  fi
+  [[ -f "$WEB_UNIT_SRC" ]] || die "unit file missing: $WEB_UNIT_SRC"
+  install -m 644 "$UNIT_SRC" "$UNIT_DST"
+  install -m 644 "$WEB_UNIT_SRC" "$WEB_UNIT_DST"
+  systemctl --user daemon-reload
+  systemctl --user enable litevpn.service litevpn-web.service >/dev/null
+  echo "setup ok"
+  echo "  config: $CONFIG_DIR"
+  echo "  secret: $SECRET_FILE"
+  echo "  unit:   $UNIT_DST"
+  echo "  web:    $WEB_UNIT_DST"
+  echo
+  echo "panel binds 127.0.0.1:9090 only. From another machine:"
+  echo "  ssh -L 9090:127.0.0.1:9090 -L 7890:127.0.0.1:7890 <this-host>"
+  echo "  then open $SUBS_URL and $WEB_URL"
+  echo
+  echo "SSH / no-desktop sessions may need linger so the user service survives logout:"
+  echo "  loginctl enable-linger \"$USER\""
+}
+
+cmd_up() {
+  [[ -f "$CFG_FILE" ]] || die "no config.yaml; run: litevpn import <url>"
+  [[ -x "$MIHOMO" ]] || die "mihomo not found (run scripts/install.sh)"
+  if has_sys_unit; then
+    systemctl start litevpn.service litevpn-web.service
+  else
+    [[ -f "$UNIT_DST" && -f "$WEB_UNIT_DST" ]] || die "run: litevpn setup"
+    systemctl --user start litevpn.service litevpn-web.service
+  fi
+  echo "started"
+  echo "  mixed proxy: 127.0.0.1:${MIXED_PORT} (localhost only)"
+  echo "  import UI:   ${SUBS_URL}  (SSH -L 9090:127.0.0.1:9090 -L 7890:127.0.0.1:7890 if remote)"
+  echo "  web UI:      ${WEB_URL}"
+  echo "  API secret:  $(secret)"
+}
+
+cmd_down() {
+  if has_sys_unit; then
+    systemctl stop litevpn-web.service litevpn.service
+  else
+    systemctl --user stop litevpn-web.service litevpn.service
+  fi
+  echo "stopped"
+}
+
+cmd_status() {
+  local st="inactive" wst="inactive"
+  if systemctl is-active --quiet litevpn.service 2>/dev/null || systemctl --user is-active --quiet litevpn.service 2>/dev/null; then
+    st="active"
+  fi
+  if systemctl is-active --quiet litevpn-web.service 2>/dev/null || systemctl --user is-active --quiet litevpn-web.service 2>/dev/null; then
+    wst="active"
+  fi
+  echo "service:     $st"
+  echo "web proxy:   $wst"
+  echo "config:      $CFG_FILE"
+  echo "import UI:   $SUBS_URL"
+  echo "web UI:      $WEB_URL"
+  echo "access:      SSH tunnel then open 127.0.0.1:9090 (do not expose 9090/7890)"
+  echo "  ssh -L 9090:127.0.0.1:9090 -L 7890:127.0.0.1:7890 <host>"
+  if [[ -s "$SECRET_FILE" ]]; then
+    echo "secret:      $(secret)"
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -lnt 2>/dev/null | grep -E "127.0.0.1:${MIXED_PORT}|127.0.0.1:9090|127.0.0.1:19090" || true
+  fi
+}
+
+cmd_log() {
+  if has_sys_unit; then
+    if [[ "${1:-}" == "-f" ]]; then
+      journalctl -u litevpn.service -u litevpn-web.service -f
+    else
+      journalctl -u litevpn.service -u litevpn-web.service -n 80 --no-pager
+    fi
+    return 0
+  fi
+  if [[ "${1:-}" == "-f" ]]; then
+    journalctl --user -u litevpn.service -u litevpn-web.service -f
+  else
+    journalctl --user -u litevpn.service -u litevpn-web.service -n 80 --no-pager
+  fi
+}
+
+reload_if_running() {
+  local s
+  s="$(secret)"
+  if curl -fsS -m 8 -X PUT "${MIHOMO_API}/configs?force=true" \
+      -H "Authorization: Bearer ${s}" \
+      -H "Content-Type: application/json" \
+      -d "{\"path\":\"${CFG_FILE}\"}" >/dev/null 2>&1; then
+    echo "reloaded running mihomo"
+    return 0
+  fi
+  if systemctl is-active --quiet litevpn.service 2>/dev/null; then
+    systemctl restart litevpn.service
+    echo "restarted litevpn.service"
+    return 0
+  fi
+  if systemctl --user is-active --quiet litevpn.service 2>/dev/null; then
+    systemctl --user restart litevpn.service
+    echo "reloaded running mihomo"
+  fi
+}
+
+cmd_import() {
+  local url="${1:-}"
+  [[ -n "$url" ]] || die "usage: litevpn import <url>"
+  ensure_dirs
+  export SECRET_FILE
+  ensure_secret
+  [[ -x "$MIHOMO" ]] || die "mihomo not found (run scripts/install.sh)"
+  [[ -f "$MERGE_PY" ]] || die "merge_config.py missing"
+  umask 077
+  python3 "$MERGE_PY" --import-url "$url" \
+    --secret "$(secret)" \
+    --ui-dir "$UI_DIR" \
+    --config-dir "$CONFIG_DIR" \
+    --share-dir "$SHARE_DIR" \
+    --mihomo "$MIHOMO" || die "failed to import subscription"
+  echo "imported subscription (URL not logged)"
+  reload_if_running
+}
+
+cmd_update() {
+  [[ -s "$URL_FILE" ]] || die "no subscription URL; run: litevpn import <url>"
+  local url
+  url="$(tr -d '\n' < "$URL_FILE")"
+  cmd_import "$url"
+}
+
+cmd_env() {
+  cat <<EOF
+export http_proxy=http://127.0.0.1:${MIXED_PORT}
+export https_proxy=http://127.0.0.1:${MIXED_PORT}
+export HTTP_PROXY=http://127.0.0.1:${MIXED_PORT}
+export HTTPS_PROXY=http://127.0.0.1:${MIXED_PORT}
+export ALL_PROXY=socks5://127.0.0.1:${MIXED_PORT}
+export all_proxy=socks5://127.0.0.1:${MIXED_PORT}
+EOF
+}
+
+cmd="${1:-help}"
+shift || true
+case "$cmd" in
+  setup) cmd_setup ;;
+  import) cmd_import "${1:-}" ;;
+  update) cmd_update ;;
+  up) cmd_up ;;
+  down) cmd_down ;;
+  status) cmd_status ;;
+  log) cmd_log "${1:-}" ;;
+  env) cmd_env ;;
+  help|-h|--help) usage ;;
+  *) die "unknown command: $cmd (try: litevpn help)" ;;
+esac

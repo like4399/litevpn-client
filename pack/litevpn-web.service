@@ -1,0 +1,15 @@
+[Unit]
+Description=litevpn-client-linux web proxy (127.0.0.1:9090)
+After=network-online.target litevpn.service
+Wants=litevpn.service
+
+[Service]
+Type=simple
+Nice=15
+Environment=SAFE_PATHS=%h/.local/share/litevpn
+ExecStart=/usr/bin/python3 %h/.local/share/litevpn/pack/web_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

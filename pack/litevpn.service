@@ -1,0 +1,14 @@
+[Unit]
+Description=litevpn-client-linux (mihomo)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SAFE_PATHS=%h/.local/share/litevpn
+ExecStart=%h/.local/bin/mihomo -d %h/.config/litevpn
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

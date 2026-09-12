@@ -1,0 +1,9 @@
+.git
+docs
+data
+__pycache__
+*.pyc
+*.md
+scripts
+litevpn
+.gitattributes

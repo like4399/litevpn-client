@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>litevpn-client-linux 订阅</title>
+  <style>
+    :root {
+      --bg: #1a1d24;
+      --card: #242832;
+      --line: #333846;
+      --text: #e8eaed;
+      --muted: #9aa3b2;
+      --accent: #f3814a;
+      --ok: #3dd68c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 28px 16px 48px; }
+    h1 { font-size: 20px; font-weight: 650; margin: 0 0 6px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+    .sub a { color: var(--accent); }
+    .row {
+      display: flex; gap: 8px; align-items: stretch; margin-bottom: 16px;
+    }
+    input, button {
+      font: inherit; border-radius: 8px; border: 1px solid var(--line);
+    }
+    input {
+      flex: 1; background: var(--card); color: var(--text);
+      padding: 10px 12px; outline: none;
+    }
+    input:focus { border-color: var(--accent); }
+    textarea {
+      width: 100%; min-height: 90px; margin-bottom: 16px; background: var(--card);
+      color: var(--text); padding: 10px 12px; outline: none; resize: vertical;
+    }
+    button {
+      padding: 10px 16px; cursor: pointer; background: var(--card); color: var(--text);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #1a120c; font-weight: 650; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .list { display: flex; flex-direction: column; gap: 10px; }
+    .item {
+      background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+      padding: 14px 16px; display: flex; justify-content: space-between; gap: 12px;
+    }
+    .item.active { border-color: #4c8dff; }
+    .name { font-weight: 650; margin-bottom: 4px; color: #6ea8ff; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .usage { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .bar { height: 6px; background: #1a1d24; border-radius: 99px; margin-top: 8px; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: #4c8dff; }
+    .err { color: #ff7b7b; font-size: 13px; min-height: 1.2em; margin: 0 0 12px; }
+    .login { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+    .login p { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>litevpn-client-linux 订阅</h1>
+    <p class="sub">面板与代理只监听本机。先 <code>ssh -L 9090:127.0.0.1:9090</code>，再打开本页。节点面板：<a href="/ui">/ui</a>。后端地址填 <code>http://127.0.0.1:9090</code>，不要填 19090。</p>
+
+    <div id="login" class="login">
+      <p>填写与 Mihomo 相同的 API secret（<code>litevpn status</code> 或配置目录里的 secret 文件）。</p>
+      <div class="row">
+        <input id="secret" type="password" placeholder="密钥" autocomplete="off" />
+        <button class="primary" type="button" id="saveSecret">进入</button>
+      </div>
+      <p class="err" id="loginErr"></p>
+    </div>
+
+    <div id="app" hidden>
+      <div class="row">
+        <input id="url" type="url" placeholder="订阅文件链接" />
+        <button type="button" id="importBtn">导入</button>
+        <button class="primary" type="button" id="newBtn">新建</button>
+      </div>
+      <textarea id="yaml" placeholder="若云服务器访问不了订阅（常见），把 Clash Verge 能打开的订阅 YAML 粘贴到这里再点导入"></textarea>
+      <p class="err" id="err"></p>
+      <div class="list" id="list"></div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const key = "litevpn.secret";
+
+    function headers() {
+      const s = sessionStorage.getItem(key) || "";
+      return { "Authorization": "Bearer " + s, "Content-Type": "application/json" };
+    }
+
+    async function api(path, opt) {
+      const res = await fetch(path, { ...opt, headers: { ...headers(), ...(opt && opt.headers) } });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+      if (!res.ok) {
+        const err = new Error(data.error || ("HTTP " + res.status));
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    }
+
+    function hostOf(h) { return h || "—"; }
+
+    function fmtTime(ts) {
+      if (!ts) return "—";
+      const d = new Date(ts * 1000);
+      return d.toLocaleString();
+    }
+
+    function fmtBytes(n) {
+      n = Number(n) || 0;
+      const gb = 1024 * 1024 * 1024;
+      if (n >= gb) return (n / gb).toFixed(2) + "GB";
+      const mb = 1024 * 1024;
+      if (n >= mb) return (n / mb).toFixed(2) + "MB";
+      if (n <= 0) return "0";
+      return n + "B";
+    }
+
+    function relTime(ts) {
+      if (!ts) return "—";
+      const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+      if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+      if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+      return Math.floor(s / 86400) + " 天前";
+    }
+
+    async function refresh() {
+      $("err").textContent = "";
+      const data = await api("/api/litevpn/subs");
+      const box = $("list");
+      box.innerHTML = "";
+      if (!data.items || !data.items.length) {
+        box.innerHTML = "<p class='meta'>还没有订阅。粘贴链接后点导入或新建。</p>";
+        return;
+      }
+      for (const it of data.items) {
+        const used = (it.upload || 0) + (it.download || 0);
+        const total = it.total || 0;
+        const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+        const el = document.createElement("div");
+        el.className = "item" + (it.id === data.active ? " active" : "");
+        el.innerHTML =
+          "<div><div class='name'></div><div class='meta'></div><div class='usage'></div><div class='bar'><span></span></div></div>" +
+          "<button type='button'>刷新</button>";
+        el.querySelector(".name").textContent = it.name || it.host;
+        el.querySelector(".meta").textContent = hostOf(it.host);
+        el.querySelector(".usage").textContent = total
+          ? fmtBytes(used) + " / " + fmtBytes(total) + " · " + relTime(it.updated_at)
+          : relTime(it.updated_at);
+        el.querySelector(".bar > span").style.width = pct + "%";
+        if (!total) el.querySelector(".bar").style.display = "none";
+        el.querySelector("button").addEventListener("click", async () => {
+          $("err").textContent = "";
+          try {
+            await api("/api/litevpn/update", { method: "POST", body: JSON.stringify({ id: it.id }) });
+            await refresh();
+          } catch (e) { $("err").textContent = e.message; }
+        });
+        box.appendChild(el);
+      }
+    }
+
+    async function doImport(name) {
+      const url = $("url").value.trim();
+      const yaml = $("yaml").value.trim();
+      if (!url && !yaml) { $("err").textContent = "请填写订阅文件链接或粘贴 YAML"; return; }
+      $("err").textContent = "";
+      $("importBtn").disabled = true;
+      $("newBtn").disabled = true;
+      try {
+        await api("/api/litevpn/import", { method: "POST", body: JSON.stringify({ url, name: name || "", yaml }) });
+        $("url").value = "";
+        $("yaml").value = "";
+        await refresh();
+      } catch (e) { $("err").textContent = e.message; }
+      $("importBtn").disabled = false;
+      $("newBtn").disabled = false;
+    }
+
+    $("saveSecret").addEventListener("click", async () => {
+      sessionStorage.setItem(key, $("secret").value.trim());
+      $("loginErr").textContent = "";
+      try {
+        await refresh();
+        $("login").hidden = true;
+        $("app").hidden = false;
+      } catch (e) {
+        $("loginErr").textContent = e.status === 401 ? "secret 被拒绝" : e.message;
+      }
+    });
+
+    $("importBtn").addEventListener("click", () => doImport(""));
+    $("newBtn").addEventListener("click", () => {
+      const name = window.prompt("订阅名称", "") || "";
+      doImport(name);
+    });
+
+    if (sessionStorage.getItem(key)) {
+      refresh().then(() => { $("login").hidden = true; $("app").hidden = false; })
+        .catch(() => { sessionStorage.removeItem(key); });
+    }
+  </script>
+</body>
+</html>
