@@ -21,35 +21,31 @@ PY
 fi
 
 python3 - <<'PY'
+import sys
 from pathlib import Path
 import os
+
+sys.path.insert(0, "/usr/share/litevpn/pack")
+import merge_config
+
 cfg_dir = Path(os.environ["CONFIG_DIR"])
 ui_dir = os.environ["UI_DIR"]
 bind = os.environ["BIND"]
 path = cfg_dir / "config.yaml"
 if not path.is_file():
     secret = (cfg_dir / "secret").read_text(encoding="utf-8").strip()
-    path.write_text(
-        "mixed-port: 7890\n"
-        "allow-lan: false\n"
-        f"bind-address: {bind}\n"
-        "mode: rule\n"
-        "log-level: info\n"
-        "ipv6: false\n"
-        "external-controller: 127.0.0.1:19090\n"
-        "external-ui: \"%s\"\n" % ui_dir
-        + "external-ui-name: ui\n"
-        f"secret: {secret}\n"
-        "proxies: []\n"
+    text = merge_config.overlay(secret, ui_dir, cfg_dir).rstrip() + "\n"
+    text += (
+        "\nproxies: []\n"
         "proxy-groups:\n"
         "  - name: PROXY\n"
         "    type: select\n"
         "    proxies:\n"
         "      - DIRECT\n"
         "rules:\n"
-        "  - MATCH,DIRECT\n",
-        encoding="utf-8",
+        "  - MATCH,DIRECT\n"
     )
+    path.write_text(text, encoding="utf-8")
     path.chmod(0o600)
 else:
     text = path.read_text(encoding="utf-8")

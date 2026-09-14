@@ -276,6 +276,25 @@ def _maybe_inject_html(path: str, data: bytes) -> bytes:
     return data
 
 
+def _persist_config_patch(path: str, method: str, body: bytes, status: int) -> None:
+    if method != "PATCH" or status < 200 or status >= 300:
+        return
+    if urlparse(path).path.rstrip("/") != "/configs":
+        return
+    try:
+        data = json.loads(body.decode("utf-8") if body else "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    patch = merge_config.filter_runtime_prefs(data if isinstance(data, dict) else {})
+    if not patch:
+        return
+    try:
+        merge_config.save_runtime_prefs(P["config_dir"], patch)
+        merge_config.apply_runtime_prefs_to_yaml(P["cfg"], patch)
+    except Exception as exc:
+        sys.stderr.write("persist runtime prefs failed: %s\n" % exc)
+
+
 def _proxy_http(handler: BaseHTTPRequestHandler) -> None:
     length = int(handler.headers.get("Content-Length") or "0")
     body = handler.rfile.read(length) if length else b""
@@ -291,6 +310,7 @@ def _proxy_http(handler: BaseHTTPRequestHandler) -> None:
     try:
         with urlopen(req, timeout=60) as resp:
             data = _maybe_inject_html(handler.path, resp.read())
+            _persist_config_patch(handler.path, handler.command, body, resp.status)
             handler.send_response(resp.status)
             _copy_upstream_headers(handler, resp.headers)
             handler.send_header("Content-Length", str(len(data)))

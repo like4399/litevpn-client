@@ -49,6 +49,17 @@ USERINFO_RE = re.compile(
     r"(upload|download|total|expire)\s*=\s*([0-9]+)",
     re.I,
 )
+RUNTIME_PREFS_NAME = "runtime-prefs.json"
+RUNTIME_PREF_DEFAULTS: dict = {
+    "allow-lan": False,
+    "mode": "rule",
+    "ipv6": False,
+    "log-level": "info",
+    "unified-delay": True,
+    "tcp-concurrent": True,
+}
+ALLOWED_MODES = {"rule", "global", "direct"}
+ALLOWED_LOG_LEVELS = {"silent", "error", "warning", "info", "debug"}
 CLASH_UA = [
     "clash-verge/v2.4.3",
     "ClashMetaForAndroid/2.11.0.Meta",
@@ -158,6 +169,7 @@ def build_runtime_config(
     ui_dir: str,
     provider_name: str,
     provider_rel: str,
+    config_dir: Path | None = None,
 ) -> tuple[str, str]:
     """Merge overlay + file proxy-provider. Returns (config.yaml, provider yaml)."""
     body = strip_keys(text, STRIP_KEYS)
@@ -186,8 +198,8 @@ def build_runtime_config(
     else:
         providers_block = ""
     if not providers_block and empty_proxies:
-        return overlay(secret, ui_dir).rstrip() + "\n\n" + body.lstrip(), ""
-    merged = overlay(secret, ui_dir).rstrip() + "\n\n"
+        return overlay(secret, ui_dir, config_dir).rstrip() + "\n\n" + body.lstrip(), ""
+    merged = overlay(secret, ui_dir, config_dir).rstrip() + "\n\n"
     if providers_block:
         merged += providers_block.rstrip() + "\n\n"
     if proxies_block and not empty_proxies:
@@ -198,17 +210,121 @@ def build_runtime_config(
     return merged, provider_file
 
 
-def overlay(secret: str, ui_dir: str) -> str:
+def _yaml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _yaml_pref_value(value) -> str:
+    if isinstance(value, bool):
+        return _yaml_bool(value)
+    return str(value)
+
+
+def filter_runtime_prefs(data: dict) -> dict:
+    out: dict = {}
+    if not isinstance(data, dict):
+        return out
+    if "allow-lan" in data and isinstance(data["allow-lan"], bool):
+        out["allow-lan"] = data["allow-lan"]
+    if "ipv6" in data and isinstance(data["ipv6"], bool):
+        out["ipv6"] = data["ipv6"]
+    if "unified-delay" in data and isinstance(data["unified-delay"], bool):
+        out["unified-delay"] = data["unified-delay"]
+    if "tcp-concurrent" in data and isinstance(data["tcp-concurrent"], bool):
+        out["tcp-concurrent"] = data["tcp-concurrent"]
+    if "mode" in data:
+        mode = str(data["mode"]).strip().lower()
+        if mode in ALLOWED_MODES:
+            out["mode"] = mode
+    if "log-level" in data:
+        level = str(data["log-level"]).strip().lower()
+        if level == "warn":
+            level = "warning"
+        if level in ALLOWED_LOG_LEVELS:
+            out["log-level"] = level
+    return out
+
+
+def load_runtime_prefs(config_dir: Path | None) -> dict:
+    prefs = dict(RUNTIME_PREF_DEFAULTS)
+    if config_dir is None:
+        return prefs
+    path = Path(config_dir) / RUNTIME_PREFS_NAME
+    if not path.is_file():
+        return prefs
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return prefs
+    prefs.update(filter_runtime_prefs(data if isinstance(data, dict) else {}))
+    return prefs
+
+
+def save_runtime_prefs(config_dir: Path, patch: dict) -> dict:
+    prefs = load_runtime_prefs(config_dir)
+    filtered = filter_runtime_prefs(patch)
+    if not filtered:
+        return prefs
+    prefs.update(filtered)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config_dir.chmod(0o700)
+    except OSError:
+        pass
+    path = Path(config_dir) / RUNTIME_PREFS_NAME
+    tmp = path.with_suffix(".json.tmp")
+    payload = {key: prefs[key] for key in RUNTIME_PREF_DEFAULTS}
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+    return prefs
+
+
+def apply_runtime_prefs_to_yaml(config_path: Path, prefs: dict) -> None:
+    filtered = filter_runtime_prefs(prefs)
+    if not filtered or not config_path.is_file():
+        return
+    text = config_path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    found: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        m = KEY_RE.match(line)
+        if m and not line.startswith((" ", "\t")):
+            key = m.group(1)
+            if key in filtered:
+                nl = "\n" if line.endswith("\n") else "\n"
+                out.append(f"{key}: {_yaml_pref_value(filtered[key])}{nl}")
+                found.add(key)
+                continue
+        out.append(line)
+    missing = [key for key in filtered if key not in found]
+    if missing:
+        insert = "".join(f"{key}: {_yaml_pref_value(filtered[key])}\n" for key in missing)
+        new_out: list[str] = []
+        inserted = False
+        for line in out:
+            new_out.append(line)
+            m = KEY_RE.match(line)
+            if (not inserted) and m and not line.startswith((" ", "\t")) and m.group(1) == "mixed-port":
+                new_out.append(insert)
+                inserted = True
+        out = new_out if inserted else [insert] + out
+    config_path.write_text("".join(out), encoding="utf-8")
+
+
+def overlay(secret: str, ui_dir: str, config_dir: Path | None = None) -> str:
     bind = os.environ.get("LITEVPN_BIND_ADDRESS", "127.0.0.1")
+    prefs = load_runtime_prefs(config_dir)
     return (
         f"mixed-port: 7890\n"
-        f"allow-lan: false\n"
+        f"allow-lan: {_yaml_bool(bool(prefs['allow-lan']))}\n"
         f"bind-address: {bind}\n"
-        f"mode: rule\n"
-        f"log-level: info\n"
-        f"ipv6: false\n"
-        f"unified-delay: true\n"
-        f"tcp-concurrent: true\n"
+        f"mode: {prefs['mode']}\n"
+        f"log-level: {prefs['log-level']}\n"
+        f"ipv6: {_yaml_bool(bool(prefs['ipv6']))}\n"
+        f"unified-delay: {_yaml_bool(bool(prefs['unified-delay']))}\n"
+        f"tcp-concurrent: {_yaml_bool(bool(prefs['tcp-concurrent']))}\n"
         f"external-controller: 127.0.0.1:19090\n"
         f"external-controller-cors:\n"
         f"  allow-origins:\n"
@@ -218,6 +334,8 @@ def overlay(secret: str, ui_dir: str) -> str:
         f"external-ui: \"{ui_dir}\"\n"
         f"external-ui-name: ui\n"
         f"secret: {secret}\n"
+        f"profile:\n"
+        f"  store-selected: true\n"
         f"dns:\n"
         f"  enable: true\n"
         f"  ipv6: false\n"
@@ -428,9 +546,9 @@ def fetch_url(url: str, timeout: int = FETCH_TIMEOUT) -> tuple[bytes, str]:
     raise ValueError(last or "failed to download subscription")
 
 
-def config_from_providers(secret: str, ui_dir: str, items: list) -> str:
+def config_from_providers(secret: str, ui_dir: str, items: list, config_dir: Path | None = None) -> str:
     """Deprecated HTTP-provider path kept for old CLI flags."""
-    head = overlay(secret, ui_dir).rstrip() + "\n"
+    head = overlay(secret, ui_dir, config_dir).rstrip() + "\n"
     usable = [it for it in items if it.get("url")]
     if not usable:
         return (
@@ -478,12 +596,12 @@ def config_from_providers(secret: str, ui_dir: str, items: list) -> str:
     return head + "\n" + "\n".join(blocks)
 
 
-def merge(raw: bytes, secret: str, ui_dir: str) -> str:
+def merge(raw: bytes, secret: str, ui_dir: str, config_dir: Path | None = None) -> str:
     body = decode_payload(raw)
     body = strip_keys(body, STRIP_KEYS)
     if not looks_like_clash(body):
         raise ValueError("subscription does not look like a Clash/Mihomo config (no proxies)")
-    return overlay(secret, ui_dir).rstrip() + "\n\n" + body.lstrip()
+    return overlay(secret, ui_dir, config_dir).rstrip() + "\n\n" + body.lstrip()
 
 
 def load_subs(config_dir: Path) -> dict:
@@ -609,7 +727,7 @@ def import_subscription(
     sub_path.chmod(0o600)
     rel = f"./providers/{found['id']}.yaml"
     merged, provider_yaml = build_runtime_config(
-        text, secret, str(ui_dir), found["name"] or host, rel
+        text, secret, str(ui_dir), found["name"] or host, rel, config_dir
     )
     per = config_dir / "providers" / f"{found['id']}.yaml"
     if provider_yaml:
@@ -655,13 +773,15 @@ def main() -> int:
         if args.providers_json:
             data = json.loads(Path(args.providers_json).read_text(encoding="utf-8"))
             items = data.get("items") if isinstance(data, dict) else data
-            merged = config_from_providers(args.secret, args.ui_dir, items or [])
+            cfg_dir = Path(args.config_dir) if args.config_dir else None
+            merged = config_from_providers(args.secret, args.ui_dir, items or [], cfg_dir)
         else:
             if not args.input or not args.output:
                 print("need --input/--output or --import-url", file=sys.stderr)
                 return 1
             raw = Path(args.input).read_bytes()
-            merged = merge(raw, args.secret, args.ui_dir)
+            cfg_dir = Path(args.config_dir) if args.config_dir else None
+            merged = merge(raw, args.secret, args.ui_dir, cfg_dir)
         if not args.output:
             print("need --output", file=sys.stderr)
             return 1
