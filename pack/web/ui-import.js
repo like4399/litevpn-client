@@ -157,19 +157,47 @@
     return null;
   }
 
+  function emptyStateHost() {
+    const nodes = document.querySelectorAll("div, p, span");
+    for (const el of nodes) {
+      if ((el.textContent || "").trim() !== "暂无数据") continue;
+      if (el.children.length > 0) continue;
+      return el.parentElement || el;
+    }
+    return null;
+  }
+
   function placeBar() {
     document.body.style.paddingBottom = "";
-    const oldDock = document.getElementById("litevpn-dock");
-    if (oldDock && oldDock.parentNode) oldDock.parentNode.removeChild(oldDock);
     if (!providersTabActive()) {
       if (bar.parentNode) bar.parentNode.removeChild(bar);
+      const dock = document.getElementById("litevpn-dock");
+      if (dock && dock.parentNode) dock.parentNode.removeChild(dock);
       document.querySelectorAll(".lv-usage-inject").forEach((n) => n.remove());
       return;
     }
     const card = fileCardEl();
-    if (!card) return;
-    if (bar.parentNode === card && card.firstElementChild === bar) return;
-    card.insertBefore(bar, card.firstChild);
+    if (card) {
+      const dock = document.getElementById("litevpn-dock");
+      if (dock && dock.parentNode) dock.parentNode.removeChild(dock);
+      if (bar.parentNode === card && card.firstElementChild === bar) return;
+      card.insertBefore(bar, card.firstChild);
+      return;
+    }
+    // 无提供者时没有 File/HTTP 卡片，挂到「暂无数据」区域，否则导入入口永远出不来
+    let dock = document.getElementById("litevpn-dock");
+    if (!dock) {
+      dock = document.createElement("div");
+      dock.id = "litevpn-dock";
+      dock.style.cssText = "width:100%;max-width:960px;margin:0 auto;padding:8px 16px 0;box-sizing:border-box;";
+    }
+    if (!dock.contains(bar)) dock.appendChild(bar);
+    const host = emptyStateHost();
+    if (host) {
+      if (dock.parentNode !== host) host.insertBefore(dock, host.firstChild);
+      return;
+    }
+    if (!dock.parentNode) document.body.appendChild(dock);
   }
 
   function fmtBytes(n) {

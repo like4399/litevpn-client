@@ -667,13 +667,37 @@ def test_and_write(mihomo: Path, config_dir: Path, share_dir: Path, text: str) -
             str(share_dir),
         ]
     )
-    proc = subprocess.run(
-        [str(mihomo), "-t", "-d", str(config_dir), "-f", str(tmp_yaml)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-    )
+    # Use a throwaway -d dir so mihomo -t never clobbers live config.yaml / geo files.
+    with tempfile.TemporaryDirectory(prefix="litevpn-t-") as td:
+        tdir = Path(td)
+        for name in ("geoip.metadb", "geosite.dat", "geoip.dat", "Country.mmdb"):
+            src = config_dir / name
+            if src.is_file():
+                try:
+                    (tdir / name).write_bytes(src.read_bytes())
+                except OSError:
+                    pass
+        env["SAFE_PATHS"] = os.pathsep.join([env["SAFE_PATHS"], str(tdir)])
+        try:
+            proc = subprocess.run(
+                [str(mihomo), "-t", "-d", str(tdir), "-f", str(tmp_yaml)],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            tmp_yaml.unlink(missing_ok=True)
+            raise ValueError("mihomo -t timed out after 120s (geo download?)") from exc
+        # Persist any freshly downloaded geo before the temp dir is removed.
+        for name in ("geoip.metadb", "geosite.dat", "geoip.dat", "Country.mmdb"):
+            src = tdir / name
+            dst = config_dir / name
+            if src.is_file() and (not dst.is_file() or src.stat().st_size > dst.stat().st_size):
+                try:
+                    dst.write_bytes(src.read_bytes())
+                except OSError:
+                    pass
     if proc.returncode != 0:
         tmp_yaml.unlink(missing_ok=True)
         err = (proc.stderr or proc.stdout or "mihomo rejected the config").strip()

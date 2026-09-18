@@ -89,7 +89,7 @@ docker compose up -d --build # 改代码后重建
 测试机构建后已推送：
 
 ```
-crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.1
+crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.2
 ```
 
 个人版 ACR 不接受 Buildx attestation。推送前需：
@@ -97,14 +97,14 @@ crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-cl
 ```bash
 docker build --provenance=false --sbom=false \
   -t litevpn-client-linux:latest \
-  -t crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.1 .
-docker push crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.1
+  -t crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.2 .
+docker push crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.2
 ```
 
 其它环境拉取（需先 `docker login` 该仓库）：
 
 ```bash
-docker pull crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.1
+docker pull crpi-xjld0ipmc9tve2uz.cn-chengdu.personal.cr.aliyuncs.com/xiaoliu_111/litevpn-client-linux:v1.2
 ```
 
 - 基础：`python:3.12-slim-bookworm` + `curl`（拉订阅）
